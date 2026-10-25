@@ -17,7 +17,7 @@ try {
 const dataDir = path.join(root, 'data')
 const articlesFile = path.join(dataDir, 'articles.json')
 const uploadsDir = path.join(dataDir, 'uploads')
-const port = Number(process.env.API_PORT || 8787)
+const port = Number(process.env.PORT || process.env.API_PORT || 8787)
 const adminUser = process.env.ADMIN_USERNAME || 'admin'
 const adminPassword = process.env.ADMIN_PASSWORD || 'ChangeMe-123!'
 const sessionTokens = new Map()
@@ -199,6 +199,60 @@ const server = http.createServer(async (req, res) => {
       if (remaining.length === all.length) return send(res, 404, { error: 'Article not found.' })
       await saveArticles(remaining)
       return send(res, 200, { ok: true })
+    }
+
+       // Serve the built React frontend for browser page requests.
+    if (req.method === 'GET' || req.method === 'HEAD') {
+      const urlPath = new URL(req.url, 'http://localhost').pathname
+      const requestedPath = decodeURIComponent(urlPath)
+      const distDir = path.join(root, 'dist')
+
+      let filePath = path.resolve(distDir, `.${requestedPath}`)
+
+      // Prevent paths from escaping the frontend build directory.
+      if (filePath !== distDir && !filePath.startsWith(distDir + path.sep)) {
+        return send(res, 400, { error: 'Invalid path.' })
+      }
+
+      try {
+        const stat = await fs.stat(filePath)
+        if (stat.isFile()) {
+          const mimeTypes = {
+            '.html': 'text/html; charset=utf-8',
+            '.js': 'text/javascript; charset=utf-8',
+            '.css': 'text/css; charset=utf-8',
+            '.svg': 'image/svg+xml',
+            '.png': 'image/png',
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.webp': 'image/webp',
+            '.ico': 'image/x-icon',
+            '.woff': 'font/woff',
+            '.woff2': 'font/woff2'
+          }
+
+          res.writeHead(200, {
+            'Content-Type': mimeTypes[path.extname(filePath).toLowerCase()] || 'application/octet-stream',
+            'X-Content-Type-Options': 'nosniff'
+          })
+
+          if (req.method === 'HEAD') return res.end()
+          return res.end(await fs.readFile(filePath))
+        }
+      } catch {}
+
+      // React single-page app fallback for browser routes.
+      if (!path.extname(requestedPath) || requestedPath.endsWith('.html')) {
+        const indexPath = path.join(distDir, 'index.html')
+        try {
+          const html = await fs.readFile(indexPath)
+          res.writeHead(200, {
+            'Content-Type': 'text/html; charset=utf-8',
+            'X-Content-Type-Options': 'nosniff'
+          })
+          return res.end(req.method === 'HEAD' ? undefined : html)
+        } catch {}
+      }
     }
 
     return send(res, 404, { error: 'Not found.' })
