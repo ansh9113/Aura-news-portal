@@ -14,9 +14,11 @@ try {
     if (match && process.env[match[1]] === undefined) process.env[match[1]] = match[2].replace(/^(['"])(.*)\1$/, '$2')
   }
 } catch {}
-const dataDir = path.join(root, 'data')
+const dataDir = process.env.DATA_DIR
+  ? path.resolve(process.env.DATA_DIR)
+  : path.join(root, 'data')
 const articlesFile = path.join(dataDir, 'articles.json')
-const port = Number(process.env.API_PORT || 8787)
+const port = Number(process.env.PORT || process.env.API_PORT || 8787)
 const adminUser = process.env.ADMIN_USERNAME || 'admin'
 const adminPassword = process.env.ADMIN_PASSWORD || 'ChangeMe-123!'
 const sessionTokens = new Map()
@@ -135,7 +137,64 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true })
     }
 
-    return send(res, 404, { error: 'Not found.' })
+   
+    if (url.pathname.startsWith('/api/')) {
+      return send(res, 404, { error: 'Not found.' })
+    }
+
+    const distDir = path.join(root, 'dist')
+    const requestedPath = decodeURIComponent(
+      url.pathname === '/' ? '/index.html' : url.pathname
+    )
+    const filePath = path.resolve(distDir, `.${requestedPath}`)
+
+    if (!filePath.startsWith(distDir + path.sep)) {
+      res.writeHead(403)
+      return res.end('Forbidden')
+    }
+
+    try {
+      const stat = await fs.stat(filePath)
+      const actualPath = stat.isDirectory()
+        ? path.join(filePath, 'index.html')
+        : filePath
+
+      const content = await fs.readFile(actualPath)
+      const types = {
+        '.html': 'text/html; charset=utf-8',
+        '.js': 'text/javascript; charset=utf-8',
+        '.css': 'text/css; charset=utf-8',
+        '.svg': 'image/svg+xml',
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.webp': 'image/webp',
+        '.ico': 'image/x-icon'
+      }
+
+      res.writeHead(200, {
+        'Content-Type': types[path.extname(actualPath).toLowerCase()]
+          || 'application/octet-stream',
+        'X-Content-Type-Options': 'nosniff'
+      })
+      return res.end(content)
+    } catch {
+      // Support client-side React routes.
+      if (path.extname(requestedPath)) {
+        res.writeHead(404)
+        return res.end('Not found')
+      }
+
+      try {
+        const html = await fs.readFile(path.join(distDir, 'index.html'))
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+        return res.end(html)
+      } catch {
+        res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' })
+        return res.end('Frontend build not found. Run npm run build.')
+      }
+    }
+
   } catch (error) {
     console.error(error)
     return send(res, 500, { error: error?.message || 'Internal server error.' })
