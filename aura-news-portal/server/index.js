@@ -14,17 +14,17 @@ try {
     if (match && process.env[match[1]] === undefined) process.env[match[1]] = match[2].replace(/^(['"])(.*)\1$/, '$2')
   }
 } catch {}
-const dataDir = process.env.DATA_DIR
-  ? path.resolve(process.env.DATA_DIR)
-  : path.join(root, 'data')
+const dataDir = path.join(root, 'data')
 const articlesFile = path.join(dataDir, 'articles.json')
-const port = Number(process.env.PORT || process.env.API_PORT || 8787)
+const uploadsDir = path.join(dataDir, 'uploads')
+const port = Number(process.env.API_PORT || 8787)
 const adminUser = process.env.ADMIN_USERNAME || 'admin'
 const adminPassword = process.env.ADMIN_PASSWORD || 'ChangeMe-123!'
 const sessionTokens = new Map()
 const maxBodyBytes = 2 * 1024 * 1024
 
 await fs.mkdir(dataDir, { recursive: true })
+await fs.mkdir(uploadsDir, { recursive: true })
 try { await fs.access(articlesFile) } catch { await fs.writeFile(articlesFile, '[]\n', 'utf8') }
 
 const send = (res, status, data, headers = {}) => {
@@ -45,6 +45,51 @@ const readBody = req => new Promise((resolve, reject) => {
   })
   req.on('error', reject)
 })
+
+const readUpload = req => new Promise((resolve, reject) => {
+  const chunks = []
+  let total = 0
+  const maxBytes = 5 * 1024 * 1024 + 64 * 1024
+  req.on('data', chunk => {
+    total += chunk.length
+    if (total > maxBytes) {
+      reject(new Error('Image must be 5 MB or smaller.'))
+      req.destroy()
+      return
+    }
+    chunks.push(chunk)
+  })
+  req.on('end', () => {
+    try {
+      const contentType = req.headers['content-type'] || ''
+      const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i)
+      if (!boundaryMatch) throw new Error('Invalid image upload request.')
+      const boundary = Buffer.from(`--${boundaryMatch[1] || boundaryMatch[2]}`)
+      const body = Buffer.concat(chunks)
+      const start = body.indexOf(Buffer.from('\r\n\r\n'))
+      if (start < 0) throw new Error('No image file was received.')
+      const headerText = body.subarray(0, start).toString('utf8')
+      if (!/name="image"/i.test(headerText) || !/filename="/i.test(headerText)) throw new Error('Choose an image file to upload.')
+      const dataStart = start + 4
+      const endMarker = Buffer.concat([Buffer.from('\r\n'), boundary])
+      const dataEnd = body.indexOf(endMarker, dataStart)
+      if (dataEnd < 0) throw new Error('Invalid image upload data.')
+      const file = body.subarray(dataStart, dataEnd)
+      const mimeMatch = headerText.match(/content-type:\s*([^\r\n]+)/i)
+      const mime = (mimeMatch?.[1] || '').trim().toLowerCase()
+      if (!file.length) throw new Error('The selected image is empty.')
+      if (file.length > 5 * 1024 * 1024) throw new Error('Image must be 5 MB or smaller.')
+      let ext = ''
+      if (mime === 'image/jpeg' && file[0] === 0xff && file[1] === 0xd8 && file[2] === 0xff) ext = '.jpg'
+      else if (mime === 'image/png' && file.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]))) ext = '.png'
+      else if (mime === 'image/webp' && file.toString('ascii', 0, 4) === 'RIFF' && file.toString('ascii', 8, 12) === 'WEBP') ext = '.webp'
+      else throw new Error('Only valid JPG, PNG, or WebP images are supported.')
+      resolve({ file, ext })
+    } catch (error) { reject(error) }
+  })
+  req.on('error', reject)
+})
+
 const getArticles = async () => JSON.parse(await fs.readFile(articlesFile, 'utf8'))
 const saveArticles = async articles => fs.writeFile(articlesFile, JSON.stringify(articles, null, 2) + '\n', 'utf8')
 const cookieValue = req => {
@@ -70,6 +115,25 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`)
   const method = req.method || 'GET'
   try {
+    if (url.pathname.startsWith('/uploads/') && method === 'GET') {
+      const name = path.basename(url.pathname.slice('/uploads/'.length))
+      if (!/^[a-f0-9-]+\.(jpg|png|webp)$/.test(name)) return send(res, 404, { error: 'Image not found.' })
+      try {
+        const file = await fs.readFile(path.join(uploadsDir, name))
+        const type = name.endsWith('.jpg') ? 'image/jpeg' : name.endsWith('.png') ? 'image/png' : 'image/webp'
+        res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'public, max-age=31536000, immutable', 'X-Content-Type-Options': 'nosniff' })
+        return res.end(file)
+      } catch { return send(res, 404, { error: 'Image not found.' }) }
+    }
+
+    if (url.pathname === '/api/upload' && method === 'POST') {
+      if (!isAdmin(req)) return send(res, 403, { error: 'Admin sign-in required.' })
+      const { file, ext } = await readUpload(req)
+      const name = `${crypto.randomUUID()}${ext}`
+      await fs.writeFile(path.join(uploadsDir, name), file, { flag: 'wx' })
+      return send(res, 201, { url: `/uploads/${name}` })
+    }
+
     if (url.pathname === '/api/health' && method === 'GET') return send(res, 200, { ok: true, storage: 'local-json-file' })
 
     if (url.pathname === '/api/session' && method === 'GET') {
@@ -137,67 +201,12 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true })
     }
 
-   
-    if (url.pathname.startsWith('/api/')) {
-      return send(res, 404, { error: 'Not found.' })
-    }
-
-    const distDir = path.join(root, 'dist')
-    const requestedPath = decodeURIComponent(
-      url.pathname === '/' ? '/index.html' : url.pathname
-    )
-    const filePath = path.resolve(distDir, `.${requestedPath}`)
-
-    if (!filePath.startsWith(distDir + path.sep)) {
-      res.writeHead(403)
-      return res.end('Forbidden')
-    }
-
-    try {
-      const stat = await fs.stat(filePath)
-      const actualPath = stat.isDirectory()
-        ? path.join(filePath, 'index.html')
-        : filePath
-
-      const content = await fs.readFile(actualPath)
-      const types = {
-        '.html': 'text/html; charset=utf-8',
-        '.js': 'text/javascript; charset=utf-8',
-        '.css': 'text/css; charset=utf-8',
-        '.svg': 'image/svg+xml',
-        '.png': 'image/png',
-        '.jpg': 'image/jpeg',
-        '.jpeg': 'image/jpeg',
-        '.webp': 'image/webp',
-        '.ico': 'image/x-icon'
-      }
-
-      res.writeHead(200, {
-        'Content-Type': types[path.extname(actualPath).toLowerCase()]
-          || 'application/octet-stream',
-        'X-Content-Type-Options': 'nosniff'
-      })
-      return res.end(content)
-    } catch {
-      // Support client-side React routes.
-      if (path.extname(requestedPath)) {
-        res.writeHead(404)
-        return res.end('Not found')
-      }
-
-      try {
-        const html = await fs.readFile(path.join(distDir, 'index.html'))
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-        return res.end(html)
-      } catch {
-        res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' })
-        return res.end('Frontend build not found. Run npm run build.')
-      }
-    }
-
+    return send(res, 404, { error: 'Not found.' })
   } catch (error) {
     console.error(error)
-    return send(res, 500, { error: error?.message || 'Internal server error.' })
+    const message = error?.message || 'Internal server error.'
+    const status = /5 MB|too large/i.test(message) ? 413 : /image|upload|choose|invalid/i.test(message) ? 400 : 500
+    return send(res, status, { error: message })
   }
 })
 

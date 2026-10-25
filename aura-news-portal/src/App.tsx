@@ -89,6 +89,7 @@ function App() {
   const [editing, setEditing] = useState<Partial<Article> | null>(null)
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
+  const [imageUploading, setImageUploading] = useState(false)
   const [activeArticle, setActiveArticle] = useState<Article | null>(null)
   const t = copy[locale]
 
@@ -177,6 +178,33 @@ function App() {
     setEditorOpen(true)
   }
 
+  const uploadCoverImage = async (file: File) => {
+    if (!isAdmin) return
+    if (file.size > 5 * 1024 * 1024) {
+      setNotice('Image must be 5 MB or smaller.')
+      return
+    }
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+      setNotice('Please choose a JPG, PNG, or WebP image.')
+      return
+    }
+    setImageUploading(true)
+    setNotice('Uploading image...')
+    try {
+      const form = new FormData()
+      form.append('image', file)
+      const response = await fetch('/api/upload', { method: 'POST', credentials: 'same-origin', body: form })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(data.error || `Upload failed (${response.status})`)
+      setEditing(current => current ? { ...current, image_url: data.url } : current)
+      setNotice('Image uploaded successfully.')
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Could not upload image.')
+    } finally {
+      setImageUploading(false)
+    }
+  }
+
   const saveArticle = async (status: 'draft' | 'published') => {
     if (!isAdmin || !editing) return
     if (!editing.title_en?.trim() && !editing.title_hi?.trim()) { setNotice(t.needFields); return }
@@ -251,9 +279,26 @@ function App() {
             <label>{t.bodyEn}<textarea rows={7} value={editing.body_en || ''} onChange={e => setEditing({...editing, body_en:e.target.value})}/></label>
             <label>{t.bodyHi}<textarea rows={7} value={editing.body_hi || ''} onChange={e => setEditing({...editing, body_hi:e.target.value})}/></label>
             <label>{t.category}<select value={editing.category || 'India'} onChange={e => setEditing({...editing, category:e.target.value})}>{['India','World','Business','Technology','Culture','Sports','Opinion'].map(c=><option key={c} value={c}>{categoryLabel(c)}</option>)}</select></label>
-            <label>{t.image}<input type="url" value={editing.image_url || ''} onChange={e => setEditing({...editing, image_url:e.target.value})} placeholder="https://…"/></label>
+            <label>
+              {locale === 'hi' ? 'डिवाइस से कवर इमेज अपलोड करें' : 'Upload cover image from device'}
+              <input
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                disabled={imageUploading || busy}
+                onChange={e => {
+                  const file = e.target.files?.[0]
+                  if (file) void uploadCoverImage(file)
+                  e.currentTarget.value = ''
+                }}
+              />
+              <small>{locale === 'hi' ? 'JPG, PNG या WebP · अधिकतम 5 MB' : 'JPG, PNG or WebP · Maximum 5 MB'}</small>
+              {imageUploading && <small>{locale === 'hi' ? 'इमेज अपलोड हो रही है…' : 'Uploading image…'}</small>}
+              {editing.image_url && <img className="admin-image-preview" src={editing.image_url} alt="Cover preview" />}
+              <small>{locale === 'hi' ? 'या नीचे इमेज URL डालें' : 'Or enter an image URL below'}</small>
+              <input type="url" value={editing.image_url || ''} onChange={e => setEditing({...editing, image_url:e.target.value})} placeholder="https://…"/>
+            </label>
           </div>
-          <div className="editor-actions"><button className="outline-button" onClick={() => setEditorOpen(false)}>{t.cancel}</button><button className="outline-button" disabled={busy} onClick={() => void saveArticle('draft')}>{t.saveDraft}</button><button className="dark-button" disabled={busy} onClick={() => void saveArticle('published')}>{busy ? '…' : t.publish}<ArrowUpRight size={15}/></button></div>
+          <div className="editor-actions"><button className="outline-button" onClick={() => setEditorOpen(false)}>{t.cancel}</button><button className="outline-button" disabled={busy || imageUploading} onClick={() => void saveArticle('draft')}>{t.saveDraft}</button><button className="dark-button" disabled={busy || imageUploading} onClick={() => void saveArticle('published')}>{busy ? '…' : t.publish}<ArrowUpRight size={15}/></button></div>
         </div>}
         {articles.length === 0 ? <div className="admin-empty"><BookOpen size={25}/><h3>{t.emptyAdmin}</h3></div> : <div className="admin-list">{articles.map(a=><div className="admin-row" key={a.id}><div className="admin-article-copy"><span className="small-label">{categoryLabel(a.category)} · {t.live}</span><strong>{titleOf(a)}</strong><small>{a.status === 'draft' ? t.draft : t.live} · {a.published_at ? new Date(a.published_at).toLocaleDateString() : ''}</small></div><div className="row-actions"><button className="outline-button" onClick={() => openEditor(a)}><PenLine size={14}/>{t.edit}</button><button className="icon-btn danger" aria-label={t.delete} onClick={() => void deleteArticle(a.id)}><Trash2 size={16}/></button></div></div>)}</div>}
       </section>}
